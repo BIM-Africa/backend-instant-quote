@@ -4,9 +4,11 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import quoteShema from './quoteShema.js'; // keep as-is
 import nodemailer from 'nodemailer';
-import axios from 'axios';
+import axios from "axios";
+
 
 dotenv.config();
+const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY;
 
 const app = express();
 app.use(cors());
@@ -79,40 +81,6 @@ const generateQuoteNumber = () => {
   return `Q-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`;
 };
 
-/* -------------------------
-   reCAPTCHA Validator
-   ------------------------- */
-const verifyRecaptcha = async (token) => {
-  try {
-    const SECRET = process.env.RECAPTCHA_SECRET;
-    if (!SECRET) {
-      console.error("RECAPTCHA_SECRET not set in .env");
-      return false;
-    }
-
-    const url = `https://www.google.com/recaptcha/api/siteverify?secret=${SECRET}&response=${token}`;
-
-    const response = await axios.post(url);
-    // Google response: { success, score, action, ... }
-    if (!response.data.success) {
-      console.log("reCAPTCHA failed:", response.data);
-      return false;
-    }
-
-    // Optional: score check for v3 (0-1)
-    if (typeof response.data.score !== "undefined" && response.data.score < 0.4) {
-      console.log("reCAPTCHA low score:", response.data.score);
-      return false;
-    }
-
-    return true;
-  } catch (err) {
-    console.error("reCAPTCHA error:", err.message || err);
-    return false;
-  }
-};
-
-
 const mapOption = {
   client: "Client to Provide",
   "bim africa to provide": "BIM Africa to Provide",
@@ -124,31 +92,44 @@ const mapOption = {
    ------------------------- */
 app.post('/save-basic', async (req, res) => {
   try {
-    // if (mongoose.connection.readyState !== 1) {
-    //   return res.status(503).json({ error: 'Database not connected' });
-    // }
+    const { name, companyName, country, email, number, recaptchaToken } = req.body;
 
-     const { captchaToken } = req.body;
-
-    if (!captchaToken) {
-      return res.status(400).json({ error: "Captcha token missing" });
+    /* --------------------------
+       1) Verify reCAPTCHA token
+       -------------------------- */
+    if (!recaptchaToken) {
+      return res.status(400).json({ error: "Missing reCAPTCHA token" });
     }
 
-    /** ------------------------------------
-     * 2) VERIFY CAPTCHA WITH GOOGLE
-     * ------------------------------------ */
-    const isHuman = await verifyRecaptcha(captchaToken);
+    const googleRes = await axios.post(
+  "https://www.google.com/recaptcha/api/siteverify",
+  null,
+  {
+    params: {
+      secret: RECAPTCHA_SECRET_KEY,
+      response: recaptchaToken,
+    },
+  }
+);
 
-    if (!isHuman) {
-      return res.status(400).json({ error: "Captcha verification failed. Bot detected." });
+const result = googleRes.data;
+
+
+    if (!result.success) {
+      console.log(result)
+      return res.status(400).json({ error: "reCAPTCHA verification failed" });
     }
 
-    const { name, companyName, country, email, number } = req.body;
-
-    if (!name || !country) {
-      return res.status(400).json({ error: 'Name and country are required' });
+    if (result.score < 0.5) {
+      return res.status(400).json({
+        error: "Suspicious activity blocked",
+        score: result.score
+      });
     }
 
+    /* --------------------------
+       2) Continue saving lead
+       -------------------------- */
     const basic = new BasicLead({
       name,
       companyName: companyName || '',
@@ -157,64 +138,21 @@ app.post('/save-basic', async (req, res) => {
       number: number || '',
     });
 
-    // Save with 8s timeout
     const saved = await Promise.race([
       basic.save(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Save operation timed out')), 12000))
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Save operation timed out')), 12000)
+      )
     ]);
 
-    // Build admin email HTML (same style as /save admin email)
-    const adminHtml = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="text-align: center; margin-bottom: 20px;">
-          <img src="https://bim.africa/logo.png" style="max-width: 200px; height: auto;" alt="BIM Africa Logo" />
-        </div>
-        <div style="background-color: #f8f9fa; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
-          <h2 style="color: #333; margin: 0;">New Basic Lead Received</h2>
-          <h3 style="color: #ff6f61; margin-top: 8px;">Lead ID: ${saved._id}</h3>
-        </div>
-        <div style="background-color: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px;">
-          <h3 style="color: #ff6f61; margin-top: 0; border-bottom: 2px solid #ff6f61; padding-bottom: 10px;">Client Information</h3>
-          <table style="width:100%; border-collapse: collapse; margin-bottom: 10px;">
-            <tr><td style="padding:8px 0; font-weight:bold;">Name:</td><td style="text-align:right;">${saved.name || ''}</td></tr>
-            <tr><td style="padding:8px 0; font-weight:bold;">Company:</td><td style="text-align:right;">${saved.companyName || ''}</td></tr>
-            <tr><td style="padding:8px 0; font-weight:bold;">Email:</td><td style="text-align:right;">${saved.email || ''}</td></tr>
-            <tr><td style="padding:8px 0; font-weight:bold;">Phone:</td><td style="text-align:right;">${saved.number || ''}</td></tr>
-            <tr><td style="padding:8px 0; font-weight:bold;">Country:</td><td style="text-align:right;">${saved.country || ''}</td></tr>
-          </table>
-        </div>
-        <div style="background-color:#ff6f61; color:white; padding:12px; border-radius:8px; text-align:center; margin-top:12px;">
-          <p style="margin:0; font-weight:bold;">Please follow up with the client as needed.</p>
-        </div>
-      </div>
-    `;
-
-    const adminEmail = {
-      from: `"BIM Africa Website" <${process.env.SMTP_USER}>`,
-      to: process.env.SMTP_USER,
-      subject: `New Basic Lead - ${saved.name || saved._id}`,
-      html: adminHtml
-    };
-
-    // Send admin email but don't fail the endpoint if email fails (10s timeout)
-    try {
-      await Promise.race([
-        transporter.sendMail(adminEmail),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Admin email timeout')), 10000))
-      ]);
-    } catch (emailErr) {
-      console.error('Admin email send error (non-fatal):', emailErr);
-    }
-
     return res.json({ success: true, id: saved._id });
+
   } catch (error) {
-    console.error('❌ /save-basic error:', error);
-    if (error.message && error.message.includes('timed out')) {
-      return res.status(503).json({ error: 'Save timed out' });
-    }
-    return res.status(500).json({ error: 'Failed to save basic lead', details: error.message });
+    console.error("❌ /save-basic error:", error);
+    return res.status(500).json({ error: error.message || "Internal server error" });
   }
 });
+
 
 
 /* -------------------------
@@ -492,9 +430,9 @@ app.get("/", (req, res) => {
 //   process.exit(0);
 // });
 
-// const port = process.env.PORT || 5000;
-// app.listen(port, () => {
-//   console.log(`🚀 Server is running on port ${port}`);
-// });
+const port = process.env.PORT || 5000;
+app.listen(port, () => {
+  console.log(`🚀 Server is running on port ${port}`);
+});
 
 export default app;
