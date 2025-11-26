@@ -81,6 +81,40 @@ const generateQuoteNumber = () => {
   return `Q-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`;
 };
 
+/* -------------------------
+   reCAPTCHA Validator
+   ------------------------- */
+const verifyRecaptcha = async (token) => {
+  try {
+    const SECRET = process.env.RECAPTCHA_SECRET;
+    if (!SECRET) {
+      console.error("RECAPTCHA_SECRET not set in .env");
+      return false;
+    }
+
+    const url = `https://www.google.com/recaptcha/api/siteverify?secret=${SECRET}&response=${token}`;
+
+    const response = await axios.post(url);
+    // Google response: { success, score, action, ... }
+    if (!response.data.success) {
+      console.log("reCAPTCHA failed:", response.data);
+      return false;
+    }
+
+    // Optional: score check for v3 (0-1)
+    if (typeof response.data.score !== "undefined" && response.data.score < 0.4) {
+      console.log("reCAPTCHA low score:", response.data.score);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error("reCAPTCHA error:", err.message || err);
+    return false;
+  }
+};
+
+
 const mapOption = {
   client: "Client to Provide",
   "bim africa to provide": "BIM Africa to Provide",
