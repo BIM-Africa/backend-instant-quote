@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import quoteShema from './quoteShema.js'; // keep as-is
 import nodemailer from 'nodemailer';
 
+
 dotenv.config();
 
 const app = express();
@@ -82,6 +83,28 @@ const mapOption = {
   client: "Client to Provide",
   "bim africa to provide": "BIM Africa to Provide",
 };
+/* -------------------------
+   reCAPTCHA v3 VERIFY
+-------------------------- */
+const verifyCaptcha = async (token) => {
+  try {
+    const secretKey = "6LcPmRgsAAAAAG46D5YNVofHmFbD3kZoH78dVeBg"; // your SECRET key
+
+    const response = await fetch(
+      `https://www.google.com/recaptcha/api/siteverify?secret=${secretKey}&response=${token}`,
+      { method: "POST" }
+    );
+
+    const data = await response.json();
+
+    // Return ONLY true if human
+    return data.success === true && data.score >= 0.3;
+  } catch (err) {
+    console.error("Captcha verify error:", err);
+    return false;
+  }
+};
+
 
 /* -------------------------
    Endpoint: save-basic
@@ -92,6 +115,15 @@ app.post('/save-basic', async (req, res) => {
     // if (mongoose.connection.readyState !== 1) {
     //   return res.status(503).json({ error: 'Database not connected' });
     // }
+    // ⬅️ STEP 1: GET TOKEN FROM BODY
+    const { captchaToken } = req.body;
+
+    // ⬅️ STEP 2: VERIFY CAPTCHA
+    const isHuman = await verifyCaptcha(captchaToken);
+    if (!isHuman) {
+      return res.status(400).json({ error: "Captcha failed. Please try again." });
+    }
+
 
     const { name, companyName, country, email, number } = req.body;
 
@@ -434,7 +466,6 @@ app.get("/", (req, res) => {
     // timestamp: new Date().toISOString()
   });
 });
-
 // process.on('SIGINT', async () => {
 //   console.log('🔄 Shutting down gracefully...');
 //   await mongoose.connection.close();
